@@ -45,6 +45,14 @@ struct ServerConfig {
     bool        enable_cors = true;
     std::string model_name  = "dflash";
     int         prefix_cache_cap = 4;   // prefix cache slots (0 disables)
+
+    // PFlash (speculative prefill compression)
+    enum class PflashMode { OFF, AUTO, ALWAYS };
+    PflashMode  pflash_mode      = PflashMode::OFF;
+    int         pflash_threshold = 32000;   // token count threshold for AUTO mode
+    float       pflash_keep_ratio = 0.05f;  // fraction of tokens to keep
+    std::string pflash_drafter_path;        // path to drafter GGUF (Qwen3-0.6B)
+    bool        pflash_skip_park = false;   // skip park/unpark for ≥32GB GPUs
 };
 
 // ─── Parsed request ─────────────────────────────────────────────────────
@@ -77,6 +85,9 @@ public:
 
     HttpServer(const HttpServer &) = delete;
     HttpServer & operator=(const HttpServer &) = delete;
+
+    // Set the optional pflash drafter tokenizer.
+    void set_drafter_tokenizer(Tokenizer * tok) { drafter_tokenizer_ = tok; }
 
     // Start listening. Blocks until shutdown() is called.
     int run();
@@ -120,6 +131,7 @@ private:
     // Members.
     ModelBackend &   backend_;
     Tokenizer &      tokenizer_;
+    Tokenizer *      drafter_tokenizer_ = nullptr;  // pflash drafter (optional)
     ServerConfig     config_;
     ChatFormat       chat_format_;
     ToolMemory       tool_memory_;

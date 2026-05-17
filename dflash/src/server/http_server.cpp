@@ -374,20 +374,84 @@ void HttpServer::worker_loop() {
             }
         }
 
+        // ── PFlash speculative prefill compression ────────────────────
+        // If pflash is enabled and prompt exceeds threshold, compress.
+        std::vector<int32_t> effective_prompt = req.prompt_tokens;
+        bool pflash_compressed = false;
+
+        if (config_.pflash_mode != ServerConfig::PflashMode::OFF &&
+            drafter_tokenizer_ != nullptr)
+        {
+            const int n_prompt = (int)req.prompt_tokens.size();
+            bool should_compress = false;
+            if (config_.pflash_mode == ServerConfig::PflashMode::ALWAYS) {
+                should_compress = true;
+            } else if (config_.pflash_mode == ServerConfig::PflashMode::AUTO) {
+                should_compress = (n_prompt >= config_.pflash_threshold);
+            }
+
+            if (should_compress) {
+                // 1. Decode prompt to text using target tokenizer
+                std::string prompt_text = tokenizer_.decode(req.prompt_tokens);
+
+                // 2. Re-encode with drafter tokenizer
+                auto drafter_ids = drafter_tokenizer_->encode(prompt_text);
+
+                if (!drafter_ids.empty()) {
+                    // 3. Compress via typed API
+                    ModelBackend::CompressRequest creq;
+                    creq.input_ids = std::move(drafter_ids);
+                    creq.keep_ratio = config_.pflash_keep_ratio;
+                    creq.drafter_path = config_.pflash_drafter_path;
+                    creq.skip_park = config_.pflash_skip_park;
+
+                    auto cresult = backend_.compress(creq);
+
+                    // 4. Decode compressed IDs with drafter tokenizer
+                    if (cresult.ok && !cresult.compressed_ids.empty()) {
+                        std::string compressed_text =
+                            drafter_tokenizer_->decode(cresult.compressed_ids);
+
+                        // 5. Re-tokenize with target tokenizer
+                        effective_prompt = tokenizer_.encode(compressed_text);
+                        pflash_compressed = true;
+
+                        std::fprintf(stderr,
+                            "[pflash] %d -> %d -> %d tokens (%.1f%% kept)\n",
+                            n_prompt, (int)cresult.compressed_ids.size(),
+                            (int)effective_prompt.size(),
+                            100.0 * effective_prompt.size() / n_prompt);
+                    }
+                }
+            }
+        }
+
         // Build generate request.
         GenerateRequest gen_req;
-        gen_req.prompt = req.prompt_tokens;
+        gen_req.prompt = effective_prompt;
         gen_req.n_gen = req.max_output;
         gen_req.sampler = req.sampler;
         gen_req.do_sample = req.sampler.temp > 0.0f;
         gen_req.stream = false;  // we handle streaming via on_token callback
 
         // Prefix cache: check for cached KV state.
-        auto [cache_slot, prefix_len] = prefix_cache_.lookup(req.prompt_tokens);
+        auto [cache_slot, prefix_len] = prefix_cache_.lookup(effective_prompt);
         bool using_restore = (cache_slot >= 0);
 
+        // Full-compress cache: if we compressed, check for cached KV.
+        if (pflash_compressed) {
+            auto [full_slot, full_len] = prefix_cache_.lookup_full(req.prompt_tokens);
+            if (full_slot >= 0) {
+                // Exact-match hit on the raw (uncompressed) prompt — skip compression.
+                cache_slot = full_slot;
+                prefix_len = full_len;
+                using_restore = true;
+                std::fprintf(stderr, "[pflash] full-cache hit slot=%d\n", full_slot);
+            }
+        }
+
         // Prepare inline snapshot for future cache hits.
-        auto [snap_slot, snap_cut] = prefix_cache_.prepare_inline_snap(req.prompt_tokens);
+        auto [snap_slot, snap_cut] = prefix_cache_.prepare_inline_snap(effective_prompt);
         bool snap_prepared = (snap_slot >= 0);
         if (snap_prepared) {
             gen_req.snap_slot = snap_slot;
@@ -438,9 +502,18 @@ void HttpServer::worker_loop() {
         // Confirm or abort the inline snapshot.
         if (snap_prepared) {
             if (completion_tokens > 0 && !client_disconnected) {
-                prefix_cache_.confirm_inline_snap(snap_slot, snap_cut, req.prompt_tokens);
+                prefix_cache_.confirm_inline_snap(snap_slot, snap_cut, effective_prompt);
             } else {
                 prefix_cache_.abort_inline_snap(snap_slot);
+            }
+        }
+
+        // Full-compress cache: reserve + confirm after successful generation.
+        if (pflash_compressed && completion_tokens > 0 && !client_disconnected) {
+            int full_slot = prefix_cache_.prepare_full_snap(req.prompt_tokens);
+            if (full_slot >= 0) {
+                prefix_cache_.confirm_full_snap(full_slot, req.prompt_tokens,
+                                                (int)effective_prompt.size());
             }
         }
 

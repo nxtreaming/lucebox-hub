@@ -40,6 +40,13 @@ static void print_usage(const char * prog) {
         "  --ddtree             Enable DDTree speculative decode\n"
         "  --ddtree-budget <N>  DDTree budget (default: 64)\n"
         "  --no-cors            Disable CORS headers\n"
+        "\n"
+        "PFlash (speculative prefill compression):\n"
+        "  --prefill-compression off|auto|always  (default: off)\n"
+        "  --prefill-threshold <N>     Token threshold for auto mode (default: 32000)\n"
+        "  --prefill-keep-ratio <F>    Fraction of tokens to keep (default: 0.05)\n"
+        "  --prefill-drafter <path>    Drafter GGUF for compression (Qwen3-0.6B)\n"
+        "  --prefill-skip-park         Skip park/unpark (for >=32GB GPUs)\n"
         "\n", prog);
 }
 
@@ -82,6 +89,22 @@ int main(int argc, char ** argv) {
             bargs.ddtree_budget = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--no-cors") == 0) {
             sconfig.enable_cors = false;
+        } else if (std::strcmp(argv[i], "--prefill-compression") == 0 && i + 1 < argc) {
+            const char * mode = argv[++i];
+            if (std::strcmp(mode, "auto") == 0)
+                sconfig.pflash_mode = ServerConfig::PflashMode::AUTO;
+            else if (std::strcmp(mode, "always") == 0)
+                sconfig.pflash_mode = ServerConfig::PflashMode::ALWAYS;
+            else
+                sconfig.pflash_mode = ServerConfig::PflashMode::OFF;
+        } else if (std::strcmp(argv[i], "--prefill-threshold") == 0 && i + 1 < argc) {
+            sconfig.pflash_threshold = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--prefill-keep-ratio") == 0 && i + 1 < argc) {
+            sconfig.pflash_keep_ratio = (float)std::atof(argv[++i]);
+        } else if (std::strcmp(argv[i], "--prefill-drafter") == 0 && i + 1 < argc) {
+            sconfig.pflash_drafter_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--prefill-skip-park") == 0) {
+            sconfig.pflash_skip_park = true;
         } else {
             std::fprintf(stderr, "[server] unknown option: %s\n", argv[i]);
             print_usage(argv[0]);
@@ -97,6 +120,26 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    // Load pflash drafter tokenizer (if pflash enabled).
+    Tokenizer drafter_tokenizer;
+    bool pflash_enabled = (sconfig.pflash_mode != ServerConfig::PflashMode::OFF);
+    if (pflash_enabled) {
+        if (sconfig.pflash_drafter_path.empty()) {
+            std::fprintf(stderr, "[server] --prefill-compression requires --prefill-drafter\n");
+            return 1;
+        }
+        std::fprintf(stderr, "[server] loading pflash drafter tokenizer from %s\n",
+                     sconfig.pflash_drafter_path.c_str());
+        if (!drafter_tokenizer.load_from_gguf(sconfig.pflash_drafter_path.c_str())) {
+            std::fprintf(stderr, "[server] drafter tokenizer load failed\n");
+            return 1;
+        }
+        std::fprintf(stderr, "[server] pflash: mode=%s threshold=%d keep=%.3f skip_park=%d\n",
+                     sconfig.pflash_mode == ServerConfig::PflashMode::AUTO ? "auto" : "always",
+                     sconfig.pflash_threshold, sconfig.pflash_keep_ratio,
+                     (int)sconfig.pflash_skip_park);
+    }
+
     // Create backend.
     std::fprintf(stderr, "[server] creating backend...\n");
     auto backend = create_backend(bargs);
@@ -109,6 +152,9 @@ int main(int argc, char ** argv) {
     std::fprintf(stderr, "[server] starting HTTP server on %s:%d\n",
                  sconfig.host.c_str(), sconfig.port);
     HttpServer server(*backend, tokenizer, sconfig);
+    if (pflash_enabled) {
+        server.set_drafter_tokenizer(&drafter_tokenizer);
+    }
     int ret = server.run();
 
     // Cleanup.
