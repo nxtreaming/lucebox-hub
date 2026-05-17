@@ -17,7 +17,7 @@
 #include "tool_memory.h"
 #include "prefix_cache.h"
 #include "api_types.h"
-#include "third_party/nlohmann/json.hpp"
+#include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <condition_variable>

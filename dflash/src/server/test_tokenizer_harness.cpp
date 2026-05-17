@@ -13,7 +13,7 @@
 //   → {"cmd":"quit"}
 
 #include "server/tokenizer.h"
-#include "server/third_party/nlohmann/json.hpp"
+#include <nlohmann/json.hpp>
 
 #include <cstdio>
 #include <iostream>

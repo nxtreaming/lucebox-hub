@@ -15,6 +15,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ── nlohmann/json (header-only, downloaded at configure time) ────────
+include(FetchContent)
+FetchContent_Declare(json
+    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+    URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+)
+FetchContent_MakeAvailable(json)
+
 # If we do not set this, ggml will output to bin and DLLs will not load
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 # ROCm root for HIP builds (rpath + rocwmma header discovery).
@@ -463,6 +471,7 @@ target_link_libraries(dflash27b
         ggml
         ${DFLASH27B_GGML_BACKEND_TARGET}
         ggml-base
+        nlohmann_json::nlohmann_json
 )
 if(DFLASH27B_GPU_BACKEND STREQUAL "hip")
     target_link_libraries(dflash27b PRIVATE hip::host)

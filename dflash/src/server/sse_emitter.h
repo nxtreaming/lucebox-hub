@@ -9,7 +9,7 @@
 #include "tool_memory.h"
 #include "reasoning.h"
 #include "api_types.h"
-#include "third_party/nlohmann/json.hpp"
+#include <nlohmann/json.hpp>
 
 #include <cstdint>
 #include <functional>
